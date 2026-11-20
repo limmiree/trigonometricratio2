@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>삼각비 모션 게임</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- MediaPipe Libraries with pinned version numbers -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.4/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils@0.6/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.4/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic@0.5.1675471629/holistic.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469242/hands.js" crossorigin="anonymous"></script>
+    
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a202c; color: white; font-family: 'Inter', sans-serif; }
+        #game-container { position: relative; width: 100vw; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        #video-element { position: absolute; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); z-index: 1; opacity: 0.75; }
+        #output-canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; z-index: 2; }
+        
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; display: flex; flex-direction: column; }
+        
+        .hud { display: flex; justify-content: space-between; padding: 12px 16px; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.8); }
+        .score-box { background: rgba(0, 0, 0, 0.6); padding: 8px 16px; border-radius: 12px; border: 2px solid #4ade80; }
+        .time-box { background: rgba(0, 0, 0, 0.6); padding: 8px 16px; border-radius: 12px; border: 2px solid #f87171; }
+        
+        #question-display { text-align: center; font-weight: bold; text-shadow: 3px 3px 6px rgba(0,0,0,0.9); background: rgba(0,0,0,0.7); border-radius: 20px; border: 2px solid #60a5fa; align-self: center; }
+
+        /* Overlays */
+        #loading, #start-screen, #game-over { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            background: rgba(15, 23, 42, 0.92); z-index: 50; 
+            display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: auto;
+            padding: 20px; box-sizing: border-box;
+        }
+        .hidden { display: none !important; }
+        
+        .btn { 
+            background: linear-gradient(to right, #3b82f6, #2563eb); color: white; 
+            font-weight: bold; padding: 12px 32px; 
+            border-radius: 30px; border: none; cursor: pointer; 
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: transform 0.2s, background 0.2s;
+        }
+        .btn:hover { transform: scale(1.05); background: linear-gradient(to right, #2563eb, #1d4ed8); }
+
+        /* Particles */
+        .particle { position: absolute; pointer-events: none; animation: fadeOut 1s forwards; font-size: 20px; font-weight: bold; }
+        @keyframes fadeOut { 0% { opacity: 1; transform: translateY(0); } 100% { opacity: 0; transform: translateY(-50px); } }
+        
+        /* Floating Text */
+        #feedback-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-weight: bold; text-shadow: 2px 2px 10px black; opacity: 0; pointer-events: none; z-index: 20; transition: opacity 0.3s; white-space: nowrap; }
+        
+        .correct-text { color: #4ade80; }
+        .wrong-text { color: #f87171; }
+        .bonus-text { color: #fbbf24; }
+
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <video id="video-element" autoplay playsinline></video>
+        <canvas id="output-canvas"></canvas>
+        
+        <!-- Game UI -->
+        <div id="ui-layer" class="hidden">
+            <div class="hud text-lg sm:text-2xl">
+                <div class="score-box">점수: <span id="score">0</span></div>
+                <div class="time-box">시간: <span id="time">05:00</span></div>
+            </div>
+            
+            <div id="question-display" class="text-2xl sm:text-4xl md:text-5xl px-4 py-2 sm:px-8 sm:py-3 mt-2 sm:mt-4">준비 중...</div>
+        </div>
+
+        <div id="feedback-text" class="text-3xl sm:text-5xl md:text-6xl"></div>
+
+        <!-- Screens -->
+        <div id="loading">
+            <h1 class="text-2xl sm:text-4xl font-bold mb-4 text-blue-400 text-center">카메라 및 AI 모델 로딩 중...</h1>
+            <p id="loading-status" class="text-base sm:text-xl text-center">카메라 권한을 허용해주세요.</p>
+            <div class="mt-8 animate-spin rounded-full h-12 w-12 sm:h-16 sm:w-16 border-t-4 border-blue-500"></div>
+            <button id="retry-cam-btn" class="btn mt-6 text-sm hidden">카메라 다시 연결</button>
+        </div>
+
+        <div id="start-screen" class="hidden">
+            <h1 class="text-3xl sm:text-5xl md:text-6xl font-extrabold mb-4 sm:mb-6 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400 drop-shadow-lg text-center">삼각비 모션 마스터</h1>
+            
+            <div class="bg-gray-800 p-4 sm:p-6 rounded-xl border border-gray-600 mb-6 max-w-2xl text-sm sm:text-base md:text-lg leading-relaxed shadow-xl text-center overflow-y-auto max-h-[35vh]">
+                <p><strong>[게임 방법]</strong></p>
+                <p>1. 화면 상단의 삼각비(sin, cos, tan) 질문을 확인하세요.</p>
+                <p>2. 위에서 빠르게 떨어지는 <strong>삼각비 풍선🎈</strong>을 손가락으로 터뜨려 정답을 맞추세요!</p>
+                <p>3. <strong>오답 풍선을 터뜨리면 점수가 차감(-5점)</strong>됩니다!</p>
+                <p>4. 떨어진 <strong>음료수(🥤)</strong>는 <strong>입을 벌려</strong> 받아먹으면 보너스(+20점)!</p>
+                <p>5. 시간이 지날수록 풍선과 음료수가 떨어지는 속도가 훨씬 빨라집니다.</p>
+                <p class="text-red-400 mt-2 font-bold">제한 시간: 5분</p>
+            </div>
+            <button id="start-btn" class="btn text-lg sm:text-2xl">게임 시작</button>
+        </div>
+
+        <div id="game-over" class="hidden">
+            <h1 class="text-4xl sm:text-6xl font-bold mb-4 text-red-500 drop-shadow-lg text-center">게임 종료!</h1>
+            <h2 class="text-2xl sm:text-4xl mb-6">최종 점수: <span id="final-score" class="text-emerald-400">0</span></h2>
+            <button id="restart-btn" class="btn text-lg sm:text-2xl">다시 하기</button>
+        </div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const videoElement = document.getElementById('video-element');
+        const canvasElement = document.getElementById('output-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const loadingStatus = document.getElementById('loading-status');
+        const retryCamBtn = document.getElementById('retry-cam-btn');
+        
+        const uiLayer = document.getElementById('ui-layer');
+        const loadingScreen = document.getElementById('loading');
+        const startScreen = document.getElementById('start-screen');
+        const gameOverScreen = document.getElementById('game-over');
+        
+        const scoreEl = document.getElementById('score');
+        const timeEl = document.getElementById('time');
+        const questionEl = document.getElementById('question-display');
+        const feedbackText = document.getElementById('feedback-text');
+
+        // Game State
+        let isGameRunning = false;
+        let score = 0;
+        let timeLeft = 300; // 5 minutes in seconds
+        let timerInterval;
+        let gameLoopRAF;
+        let modelsLoaded = 0;
+        
+        // Math Data (30 deg, 45 deg, 60 deg)
+        const mathData = [
+            { q: "sin(30°)", a: "1/2" }, { q: "cos(30°)", a: "√3/2" }, { q: "tan(30°)", a: "√3/3" },
+            { q: "sin(45°)", a: "√2/2" }, { q: "cos(45°)", a: "√2/2" }, { q: "tan(45°)", a: "1" },
+            { q: "sin(60°)", a: "√3/2" }, { q: "cos(60°)", a: "1/2" }, { q: "tan(60°)", a: "√3" }
+        ];
+        const allAnswers = ["1/2", "√3/2", "√3/3", "√2/2", "1", "√3", "0", "무한대"]; 
+
+        let currentQuestion = null;
+        let currentOptions = [];
+        let correctAnswerIndex = -1;
+        let canAnswer = true;
+        let answerCooldown = 0;
+
+        // Falling Answer Balloons Data
+        let balloons = [];
+        const balloonColors = [
+            { bg: '#ef4444', border: '#fca5a5' }, // Red
+            { bg: '#3b82f6', border: '#93c5fd' }, // Blue
+            { bg: '#10b981', border: '#6ee7b7' }, // Green
+            { bg: '#f59e0b', border: '#fcd34d' }, // Amber
+            { bg: '#8b5cf6', border: '#c4b5fd' }  // Purple
+        ];
+
+        // Drink Object Data
+        let drink = {
+            active: false,
+            x: 0,
+            y: 0,
+            size: 60,
+            speed: 2,
+            baseSpeed: 2,
+            emoji: '🥤'
+        };
+        let lastDrinkSpawnTime = 0;
+        let drinkSpawnInterval = 7000;
+
+        // Pointers
+        let pointers = {
+            leftIndex: { x: -1, y: -1 },
+            rightIndex: { x: -1, y: -1 },
+            mouthBounds: { minX: -1, maxX: -1, minY: -1, maxY: -1, isOpen: false }
+        };
+
+        function resizeCanvas() {
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        function checkModelsLoaded() {
+            modelsLoaded++;
+            if (modelsLoaded >= 1) {
+                loadingScreen.classList.add('hidden');
+                startScreen.classList.remove('hidden');
+            }
+        }
+
+        let holistic = null;
+        let handsModel = null;
+        
+        try {
+            holistic = new Holistic({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic@0.5.1675471629/${file}`
+            });
+
+            holistic.setOptions({
+                modelComplexity: 0,
+                smoothLandmarks: true,
+                refineFaceLandmarks: true,
+                minDetectionConfidence: 0.3,
+                minTrackingConfidence: 0.3
+            });
+
+            holistic.onResults((results) => {
+                if (!isGameRunning) return;
+
+                const w = canvasElement.width;
+                const h = canvasElement.height;
+
+                // Reset Mouth Bounds
+                pointers.mouthBounds = { minX: -1, maxX: -1, minY: -1, maxY: -1, isOpen: false };
+
+                // Pose / Hand Fallback for Left/Right Index
+                if (results.leftHandLandmarks && results.leftHandLandmarks[8]) {
+                    pointers.leftIndex = { x: (1 - results.leftHandLandmarks[8].x) * w, y: results.leftHandLandmarks[8].y * h };
+                } else if (results.poseLandmarks && results.poseLandmarks[19]) {
+                    pointers.leftIndex = { x: (1 - results.poseLandmarks[19].x) * w, y: results.poseLandmarks[19].y * h };
+                }
+
+                if (results.rightHandLandmarks && results.rightHandLandmarks[8]) {
+                    pointers.rightIndex = { x: (1 - results.rightHandLandmarks[8].x) * w, y: results.rightHandLandmarks[8].y * h };
+                } else if (results.poseLandmarks && results.poseLandmarks[20]) {
+                    pointers.rightIndex = { x: (1 - results.poseLandmarks[20].x) * w, y: results.poseLandmarks[20].y * h };
+                }
+
+                // Face Mouth Detection
+                if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+                    const mouthIndices = [61, 291, 0, 17, 13, 14];
+                    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+
+                    mouthIndices.forEach((idx) => {
+                        if (results.faceLandmarks[idx]) {
+                            const lm = results.faceLandmarks[idx];
+                            const px = (1 - lm.x) * w;
+                            const py = lm.y * h;
+                            if (px < minX) minX = px;
+                            if (px > maxX) maxX = px;
+                            if (py < minY) minY = py;
+                            if (py > maxY) maxY = py;
+                        }
+                    });
+
+                    let mouthOpenness = 0;
+                    if (results.faceLandmarks[13] && results.faceLandmarks[14]) {
+                        mouthOpenness = (results.faceLandmarks[14].y - results.faceLandmarks[13].y) * h;
+                    }
+
+                    pointers.mouthBounds = { minX, maxX, minY, maxY, isOpen: mouthOpenness > 12 };
+                }
+            });
+        } catch (err) {
+            console.warn("MediaPipe Holistic setup issue:", err);
+        }
+
+        // Initialize Standalone MediaPipe Hands Model
+        try {
+            handsModel = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469242/${file}`
+            });
+
+            handsModel.setOptions({
+                maxNumHands: 2,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.3,
+                minTrackingConfidence: 0.3
+            });
+
+            handsModel.onResults((results) => {
+                if (!isGameRunning) return;
+                const w = canvasElement.width;
+                const h = canvasElement.height;
+
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    results.multiHandLandmarks.forEach((landmarks, idx) => {
+                        if (landmarks[8]) { // Index finger tip
+                            const x = (1 - landmarks[8].x) * w;
+                            const y = landmarks[8].y * h;
+                            if (idx === 0) {
+                                pointers.leftIndex = { x, y };
+                            } else {
+                                pointers.rightIndex = { x, y };
+                            }
+                        }
+                    });
+                }
+            });
+        } catch (e) {
+            console.warn("MediaPipe Hands setup issue:", e);
+        }
+
+        // Direct HTML5 Camera Initialization
+        let isProcessingFrame = false;
+        async function initCamera() {
+            if (loadingStatus) loadingStatus.innerText = "카메라를 연결하는 중입니다...";
+            try {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error("카메라 API를 지원하지 않는 환경입니다.");
+                }
+
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                        facingMode: "user"
+                    },
+                    audio: false
+                });
+
+                videoElement.srcObject = stream;
+                await videoElement.play();
+
+                if (loadingStatus) loadingStatus.innerText = "AI 모델 초기화 완료!";
+                checkModelsLoaded();
+                processCameraLoop();
+            } catch (err) {
+                console.error("카메라 연결 실패:", err);
+                if (loadingStatus) {
+                    loadingStatus.innerText = "⚠️ 카메라를 찾을 수 없거나 권한이 거부되었습니다. 카메라 접근을 허용해 주세요.";
+                    loadingStatus.style.color = "#f87171";
+                }
+                if (retryCamBtn) retryCamBtn.classList.remove('hidden');
+                setTimeout(checkModelsLoaded, 2000);
+            }
+        }
+
+        async function processCameraLoop() {
+            if (isGameRunning && videoElement.readyState >= 2 && !isProcessingFrame) {
+                isProcessingFrame = true;
+                try {
+                    if (holistic) await holistic.send({ image: videoElement });
+                    if (handsModel) await handsModel.send({ image: videoElement });
+                } catch (e) {
+                    console.warn("Frame processing error:", e);
+                }
+                isProcessingFrame = false;
+            }
+            requestAnimationFrame(processCameraLoop);
+        }
+        function drawPointer(x, y, color, label) {
+            if (x < 0 || y < 0) return;
+            canvasCtx.save();
+            
+            // Outer Glowing Ring
+            canvasCtx.beginPath();
+            canvasCtx.arc(x, y, 22, 0, 2 * Math.PI);
+            canvasCtx.fillStyle = color;
+            canvasCtx.globalAlpha = 0.4;
+            canvasCtx.fill();
+
+            // Inner Core
+            canvasCtx.beginPath();
+            canvasCtx.arc(x, y, 14, 0, 2 * Math.PI);
+            canvasCtx.fillStyle = color;
+            canvasCtx.globalAlpha = 1.0;
+            canvasCtx.fill();
+            canvasCtx.strokeStyle = 'white';
+            canvasCtx.lineWidth = 3;
+            canvasCtx.stroke();
+
+            // Label
+            if (label) {
+                canvasCtx.fillStyle = 'white';
+                canvasCtx.font = 'bold 12px Inter, sans-serif';
+                canvasCtx.textAlign = 'center';
+                canvasCtx.fillText(label, x, y - 28);
+            }
+
+            canvasCtx.restore();
+        }
+
+        function drawPointer(x, y, color) {
+            if (x < 0 || y < 0) return;
+            canvasCtx.beginPath();
+            canvasCtx.arc(x, y, 16, 0, 2 * Math.PI);
+            canvasCtx.fillStyle = color;
+            canvasCtx.fill();
+            canvasCtx.strokeStyle = 'white';
+            canvasCtx.lineWidth = 3;
+            canvasCtx.stroke();
+        }
+
+        let camera = null;
+        try {
+            camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    if (isGameRunning && holistic) {
+                        try {
+                            await holistic.send({ image: videoElement });
+                        } catch (e) {
+                            console.warn("Frame processing error:", e);
+                        }
+                    }
+                },
+                width: 640,
+                height: 480
+            });
+        } catch (err) {
+            console.warn("Camera init error:", err);
+        }
+
+        // Mouse/Touch Direct Click Fallback
+        function handlePointerInput(x, y) {
+            if (!isGameRunning) return;
+
+            if (canAnswer && answerCooldown <= 0) {
+                balloons.forEach((balloon) => {
+                    if (balloon.popped) return;
+                    const dist = Math.hypot(x - balloon.x, y - balloon.y);
+                    if (dist < balloon.radius + 20) {
+                        balloon.popped = true;
+                        createParticles(balloon.x, balloon.y, '💥', balloon.color);
+
+                        if (balloon.isCorrect) {
+                            answerCooldown = 60;
+                            canAnswer = false;
+                            updateScore(10);
+                            showFeedback("정답! 🎉", "correct-text");
+                            setTimeout(() => {
+                                generateQuestion();
+                            }, 800);
+                        } else {
+                            updateScore(-5);
+                            showFeedback("오답! ❌", "wrong-text");
+                        }
+                    }
+                });
+            }
+
+            if (drink.active) {
+                const dist = Math.hypot(x - drink.x, y - drink.y);
+                if (dist < drink.size) {
+                    drink.active = false;
+                    updateScore(20);
+                    showFeedback("+20 보너스! 🥤", "bonus-text");
+                    createParticles(drink.x, drink.y, '✨', '#fbbf24');
+                }
+            }
+        }
+
+        window.addEventListener('click', (e) => handlePointerInput(e.clientX, e.clientY));
+        window.addEventListener('touchstart', (e) => {
+            if (e.touches && e.touches.length > 0) {
+                handlePointerInput(e.touches[0].clientX, e.touches[0].clientY);
+            }
+        }, { passive: true });
+
+        function generateQuestion() {
+            canAnswer = true;
+            
+            currentQuestion = mathData[Math.floor(Math.random() * mathData.length)];
+            questionEl.innerText = `${currentQuestion.q} = ?`;
+            
+            correctAnswerIndex = Math.floor(Math.random() * 3);
+            currentOptions = ["", "", ""];
+            currentOptions[correctAnswerIndex] = currentQuestion.a;
+            
+            let usedWrongAnswers = [];
+            for (let i = 0; i < 3; i++) {
+                if (i !== correctAnswerIndex) {
+                    let wrongAnswer;
+                    do {
+                        wrongAnswer = allAnswers[Math.floor(Math.random() * allAnswers.length)];
+                    } while (wrongAnswer === currentQuestion.a || usedWrongAnswers.includes(wrongAnswer));
+                    currentOptions[i] = wrongAnswer;
+                    usedWrongAnswers.push(wrongAnswer);
+                }
+            }
+
+            spawnBalloons();
+        }
+
+        function spawnBalloons() {
+            balloons = [];
+            const screenW = window.innerWidth;
+            const screenH = window.innerHeight;
+            
+            // Lanes dynamically fitted to screen width
+            const margin = Math.min(screenW * 0.15, 100);
+            const usableWidth = screenW - (margin * 2);
+            const lanes = [
+                margin + usableWidth * 0.18,
+                margin + usableWidth * 0.5,
+                margin + usableWidth * 0.82
+            ];
+            
+            // Speed increases as time passes (from 5 minutes down to 0)
+            const timeElapsed = 300 - timeLeft;
+            const speedBoost = timeElapsed / 30; // Faster acceleration curve
+            const currentSpeed = 4.5 + speedBoost; // Increased base falling speed
+
+            // Dynamic balloon size based on screen size
+            const responsiveRadius = Math.min(Math.max(Math.min(screenW, screenH) * 0.065, 40), 65);
+
+            for (let i = 0; i < 3; i++) {
+                const colorObj = balloonColors[Math.floor(Math.random() * balloonColors.length)];
+                balloons.push({
+                    id: i,
+                    text: currentOptions[i],
+                    isCorrect: (i === correctAnswerIndex),
+                    x: lanes[i] + (Math.random() * 20 - 10),
+                    baseX: lanes[i],
+                    y: -120 - (Math.random() * 80),
+                    radius: responsiveRadius,
+                    speed: currentSpeed + (Math.random() * 0.8),
+                    swayFreq: 0.02 + Math.random() * 0.02,
+                    swayAmp: responsiveRadius * 0.3 + Math.random() * 10,
+                    swayOffset: Math.random() * Math.PI * 2,
+                    color: colorObj.bg,
+                    borderColor: colorObj.border,
+                    popped: false
+                });
+            }
+        }
+
+        function updateAndDrawBalloons() {
+            let allOffScreenOrPopped = true;
+
+            balloons.forEach(b => {
+                if (b.popped) return;
+
+                // Physics update
+                b.y += b.speed;
+                b.x = b.baseX + Math.sin(b.y * b.swayFreq + b.swayOffset) * b.swayAmp;
+
+                if (b.y < window.innerHeight + b.radius * 2) {
+                    allOffScreenOrPopped = false;
+                }
+
+                // Render Balloon Body
+                canvasCtx.save();
+                
+                // Balloon String
+                canvasCtx.beginPath();
+                canvasCtx.moveTo(b.x, b.y + b.radius);
+                canvasCtx.quadraticCurveTo(b.x + 10, b.y + b.radius + 20, b.x - 5, b.y + b.radius + 40);
+                canvasCtx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+                canvasCtx.lineWidth = 2;
+                canvasCtx.stroke();
+
+                // Balloon Shadow/Glow
+                canvasCtx.shadowColor = b.color;
+                canvasCtx.shadowBlur = 15;
+
+                // Oval Balloon Body
+                canvasCtx.beginPath();
+                canvasCtx.ellipse(b.x, b.y, b.radius, b.radius * 1.15, 0, 0, 2 * Math.PI);
+                canvasCtx.fillStyle = b.color;
+                canvasCtx.fill();
+                canvasCtx.lineWidth = 4;
+                canvasCtx.strokeStyle = b.borderColor;
+                canvasCtx.stroke();
+
+                // Balloon Highlight
+                canvasCtx.shadowBlur = 0;
+                canvasCtx.beginPath();
+                canvasCtx.ellipse(b.x - b.radius * 0.35, b.y - b.radius * 0.4, b.radius * 0.25, b.radius * 0.15, -Math.PI / 4, 0, 2 * Math.PI);
+                canvasCtx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+                canvasCtx.fill();
+
+                // Balloon Knot
+                canvasCtx.beginPath();
+                canvasCtx.moveTo(b.x - 8, b.y + b.radius * 1.12);
+                canvasCtx.lineTo(b.x + 8, b.y + b.radius * 1.12);
+                canvasCtx.lineTo(b.x, b.y + b.radius * 1.02);
+                canvasCtx.fillStyle = b.color;
+                canvasCtx.fill();
+
+                // Text inside balloon (dynamically scaled)
+                const fontSize = Math.max(Math.floor(b.radius * 0.52), 18);
+                canvasCtx.shadowColor = 'black';
+                canvasCtx.shadowBlur = 4;
+                canvasCtx.fillStyle = 'white';
+                canvasCtx.font = `bold ${fontSize}px Inter, sans-serif`;
+                canvasCtx.textAlign = 'center';
+                canvasCtx.textBaseline = 'middle';
+                canvasCtx.fillText(b.text, b.x, b.y);
+
+                canvasCtx.restore();
+            });
+
+            // Respawn balloons if all fell off without correct hit
+            if (allOffScreenOrPopped && isGameRunning && canAnswer) {
+                spawnBalloons();
+            }
+        }
+
+        function showFeedback(text, typeClass) {
+            feedbackText.innerText = text;
+            feedbackText.className = typeClass;
+            feedbackText.style.opacity = 1;
+            
+            setTimeout(() => {
+                feedbackText.style.opacity = 0;
+            }, 1000);
+            
+            createParticles(window.innerWidth/2, window.innerHeight/2, text, typeClass === 'correct-text' ? '#4ade80' : '#f87171');
+        }
+
+        function updateScore(amount) {
+            score += amount;
+            scoreEl.innerText = score;
+            
+            scoreEl.style.transform = 'scale(1.5)';
+            scoreEl.style.color = amount > 0 ? '#4ade80' : '#f87171';
+            setTimeout(() => {
+                scoreEl.style.transform = 'scale(1)';
+                scoreEl.style.color = 'white';
+            }, 200);
+        }
+
+        function manageDrink(timestamp) {
+            if (!drink.active) {
+                if (timestamp - lastDrinkSpawnTime > drinkSpawnInterval) {
+                    if (Math.random() > 0.3) {
+                        spawnDrink();
+                    }
+                    lastDrinkSpawnTime = timestamp;
+                }
+            } else {
+                drink.y += drink.speed;
+                let timeElapsed = 300 - timeLeft;
+                drink.speed = drink.baseSpeed + (timeElapsed / 30);
+
+                if (drink.y > window.innerHeight + drink.size) {
+                    drink.active = false;
+                }
+            }
+        }
+
+        function spawnDrink() {
+            drink.active = true;
+            drink.size = Math.max(45, Math.min(window.innerWidth * 0.06, 75));
+            drink.x = (window.innerWidth * 0.15) + Math.random() * (window.innerWidth * 0.7);
+            drink.y = -drink.size;
+            drink.baseSpeed = 4.0;
+        }
+
+        function drawDrink() {
+            if (!drink.active) return;
+            canvasCtx.font = `${drink.size}px Arial`;
+            canvasCtx.textAlign = "center";
+            canvasCtx.textBaseline = "middle";
+            canvasCtx.fillText(drink.emoji, drink.x, drink.y);
+        }
+
+        function checkCollisions() {
+            // Balloon Finger Collisions
+            if (canAnswer && answerCooldown <= 0) {
+                balloons.forEach(balloon => {
+                    if (balloon.popped) return;
+
+                    const finger1 = pointers.leftIndex;
+                    const finger2 = pointers.rightIndex;
+
+                    const dist1 = finger1.x > 0 ? Math.hypot(finger1.x - balloon.x, finger1.y - balloon.y) : Infinity;
+                    const dist2 = finger2.x > 0 ? Math.hypot(finger2.x - balloon.x, finger2.y - balloon.y) : Infinity;
+
+                    if (dist1 < balloon.radius + 15 || dist2 < balloon.radius + 15) {
+                        balloon.popped = true;
+                        createParticles(balloon.x, balloon.y, '💥', balloon.color);
+
+                        if (balloon.isCorrect) {
+                            answerCooldown = 60;
+                            canAnswer = false;
+                            updateScore(10);
+                            showFeedback("정답! 🎉", "correct-text");
+                            setTimeout(() => {
+                                generateQuestion();
+                            }, 800);
+                        } else {
+                            updateScore(-5);
+                            showFeedback("오답! ❌", "wrong-text");
+                        }
+                    }
+                });
+            }
+
+            // Drink Mouth Collisions
+            if (drink.active && pointers.mouthBounds.isOpen) {
+                const mb = pointers.mouthBounds;
+                const drinkRadius = drink.size / 2;
+                
+                if (drink.x > mb.minX - drinkRadius && 
+                    drink.x < mb.maxX + drinkRadius && 
+                    drink.y > mb.minY - drinkRadius && 
+                    drink.y < mb.maxY + drinkRadius) {
+                    
+                    drink.active = false;
+                    updateScore(20);
+                    showFeedback("+20 보너스! 🥤", "bonus-text");
+                    createParticles(drink.x, drink.y, '✨', '#fbbf24');
+                }
+            }
+        }
+
+        function createParticles(x, y, text, color) {
+            for(let i=0; i<4; i++) {
+                const particle = document.createElement('div');
+                particle.className = 'particle';
+                particle.innerText = text;
+                particle.style.left = (x - 10 + (Math.random()*30 - 15)) + 'px';
+                particle.style.top = y + 'px';
+                particle.style.color = color;
+                document.body.appendChild(particle);
+                
+                setTimeout(() => particle.remove(), 1000);
+            }
+        }
+
+        function formatTime(seconds) {
+            const m = Math.floor(seconds / 60);
+            const s = seconds % 60;
+            return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        }
+
+        function startGame() {
+            startScreen.classList.add('hidden');
+            uiLayer.classList.remove('hidden');
+            
+            isGameRunning = true;
+            score = 0;
+            timeLeft = 300;
+            scoreEl.innerText = score;
+            timeEl.innerText = formatTime(timeLeft);
+            
+            drink.active = false;
+            drink.baseSpeed = 2.5;
+            
+            generateQuestion();
+            
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                timeEl.innerText = formatTime(timeLeft);
+                
+                if (timeLeft <= 60) timeEl.parentElement.style.borderColor = '#ef4444';
+                
+                if (timeLeft <= 0) {
+                    endGame();
+                }
+            }, 1000);
+            
+            requestAnimationFrame(gameLoop);
+        }
+
+        function endGame() {
+            isGameRunning = false;
+            clearInterval(timerInterval);
+            cancelAnimationFrame(gameLoopRAF);
+            
+            uiLayer.classList.add('hidden');
+            gameOverScreen.classList.remove('hidden');
+            document.getElementById('final-score').innerText = score;
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        }
+
+        function gameLoop(timestamp) {
+            if (!isGameRunning) return;
+            
+            if (answerCooldown > 0) answerCooldown--;
+
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            drawPointer(pointers.leftIndex.x, pointers.leftIndex.y, '#3b82f6', '손가락 1');
+            drawPointer(pointers.rightIndex.x, pointers.rightIndex.y, '#ef4444', '손가락 2');
+
+            if (pointers.mouthBounds.minX !== -1 && pointers.mouthBounds.minX !== Infinity) {
+                const mb = pointers.mouthBounds;
+                canvasCtx.strokeStyle = mb.isOpen ? '#fbbf24' : 'rgba(255,255,255,0.3)';
+                canvasCtx.lineWidth = 3;
+                canvasCtx.strokeRect(mb.minX, mb.minY, mb.maxX - mb.minX, mb.maxY - mb.minY);
+                
+                if (mb.isOpen) {
+                    canvasCtx.fillStyle = 'rgba(251, 191, 36, 0.3)';
+                    canvasCtx.fillRect(mb.minX, mb.minY, mb.maxX - mb.minX, mb.maxY - mb.minY);
+                }
+            }
+            
+            updateAndDrawBalloons();
+            drawDrink();
+            checkCollisions();
+            manageDrink(timestamp);
+            
+            gameLoopRAF = requestAnimationFrame(gameLoop);
+        }
+
+        document.getElementById('start-btn').addEventListener('click', startGame);
+        document.getElementById('restart-btn').addEventListener('click', () => {
+            gameOverScreen.classList.add('hidden');
+            startGame();
+        });
+
+        if (holistic) {
+            holistic.initialize().then(() => initCamera()).catch(() => initCamera());
+        } else {
+            initCamera();
+        }
+
+    </script>
+</body>
+</html>
